@@ -55,7 +55,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <AuthProvider>
-        <BrowserRouter>
+        <BrowserRouter basename={import.meta.env.BASE_URL}>
           <Routes>
             {/* Auth Pages (no layout) */}
             <Route path="/login" element={<Login />} />
