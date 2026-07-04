@@ -5,8 +5,7 @@ import nodemailer from 'nodemailer';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
-import sqlite3 from 'sqlite3';
-import { open, Database } from 'sqlite';
+import { createClient } from '@supabase/supabase-js';
 
 // Load environmental variables
 dotenv.config();
@@ -22,89 +21,6 @@ app.use(express.json());
 const dataDir = path.join(process.cwd(), 'data');
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
-}
-
-// Parse SQLite database path from DATABASE_URL
-let dbFile = './xelco.db';
-if (process.env.DATABASE_URL) {
-  let url = process.env.DATABASE_URL;
-  if (url.startsWith('sqlite:///')) {
-    dbFile = url.substring(10);
-  } else if (url.startsWith('sqlite://')) {
-    dbFile = url.substring(9);
-  } else if (url.startsWith('sqlite:')) {
-    dbFile = url.substring(7);
-  }
-}
-
-let db: Database;
-
-async function initDb() {
-  console.log(`[SQLite] Connecting to SQLite database at: ${dbFile}`);
-  db = await open({
-    filename: dbFile,
-    driver: sqlite3.Database
-  });
-
-  // Create users table if not exists with default seeding
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      email TEXT PRIMARY KEY,
-      password TEXT NOT NULL,
-      firstName TEXT NOT NULL,
-      lastName TEXT NOT NULL,
-      name TEXT NOT NULL,
-      phone TEXT NOT NULL,
-      role TEXT NOT NULL,
-      createdAt TEXT NOT NULL
-    )
-  `);
-
-  // Insert default users if table is empty
-  const countRes = await db.get<{ count: number }>('SELECT COUNT(*) as count FROM users');
-  if (countRes && countRes.count === 0) {
-    console.log('[SQLite] Seeding default users into sqlite database');
-    const defaultUsers = [
-      { 
-        email: 'admin@xelco.com', 
-        password: 'password123', 
-        firstName: 'System', 
-        lastName: 'Admin', 
-        name: 'System Admin', 
-        role: 'Admin', 
-        phone: '1234567890',
-        createdAt: new Date().toISOString() 
-      },
-      { 
-        email: 'supervisor@xelco.com', 
-        password: 'password123', 
-        firstName: 'John', 
-        lastName: 'Supervisor', 
-        name: 'John Supervisor', 
-        role: 'Supervisor', 
-        phone: '9876543210',
-        createdAt: new Date().toISOString() 
-      },
-      { 
-        email: 'housekeeping@xelco.com', 
-        password: 'password123', 
-        firstName: 'Alice', 
-        lastName: 'Staff', 
-        name: 'Alice Staff', 
-        role: 'Housekeeping Staff', 
-        phone: '5550293847',
-        createdAt: new Date().toISOString() 
-      }
-    ];
-
-    for (const u of defaultUsers) {
-      await db.run(
-        `INSERT INTO users (email, password, firstName, lastName, name, phone, role, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [u.email, u.password, u.firstName, u.lastName, u.name, u.phone, u.role, u.createdAt]
-      );
-    }
-  }
 }
 
 // In-Memory store for pending registration OTP verification
@@ -128,6 +44,17 @@ const otpExpireMinutes = parseInt(process.env.OTP_EXPIRE_MINUTES || '5', 10);
 const tokenExpiry = process.env.ACCESS_TOKEN_EXPIRE_MINUTES 
   ? parseInt(process.env.ACCESS_TOKEN_EXPIRE_MINUTES, 10) * 60 
   : 24 * 60 * 60;
+
+// Initialize Supabase Client
+const supabaseUrl = process.env.VITE_SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+let supabase: ReturnType<typeof createClient>;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.warn('[Supabase] VITE_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing. Authentication will fail.');
+} else {
+  supabase = createClient(supabaseUrl, supabaseKey);
+}
 
 let transporter: nodemailer.Transporter | null = null;
 if (useRealSmtp) {
@@ -197,8 +124,21 @@ app.post('/api/auth/register-request', async (req: express.Request, res: express
       return res.status(400).json({ error: 'All fields are required.' });
     }
 
+    if (!supabase) return res.status(500).json({ error: 'Database service not configured.' });
+
     const emailLower = email.trim().toLowerCase();
-    const existingUser = await db.get('SELECT * FROM users WHERE email = ?', [emailLower]);
+    
+    // Use Supabase instead of SQLite
+    const { data: existingUser, error: dbError } = await supabase
+      .from('users')
+      .select('email')
+      .eq('email', emailLower)
+      .maybeSingle() as { data: any, error: any };
+
+    if (dbError) {
+      console.error('Supabase error checking existing user:', dbError);
+      return res.status(500).json({ error: 'Database error checking user.' });
+    }
 
     if (existingUser) {
       return res.status(400).json({ error: 'This email is already registered.' });
@@ -238,6 +178,8 @@ app.post('/api/auth/register-verify', async (req: express.Request, res: express.
       return res.status(400).json({ error: 'Email and verification code are required.' });
     }
 
+    if (!supabase) return res.status(500).json({ error: 'Database service not configured.' });
+
     const emailLower = email.trim().toLowerCase();
     const pending = pendingRegistrationStore.get(emailLower);
 
@@ -257,29 +199,37 @@ app.post('/api/auth/register-verify', async (req: express.Request, res: express.
     // Code verified: delete pending record
     pendingRegistrationStore.delete(emailLower);
 
-    // Save user in users database
-    const isDup = await db.get('SELECT * FROM users WHERE email = ?', [emailLower]);
-    if (isDup) {
+    // Make sure they didn't get created in the meantime
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('email')
+      .eq('email', emailLower)
+      .maybeSingle() as { data: any, error: any };
+
+    if (existingUser) {
       return res.status(400).json({ error: 'This email is already registered.' });
     }
 
     const { firstName, lastName, phone, password, role } = pending.payload;
     const newUser = {
       email: emailLower,
-      password, // Simple plaintext password for dev simplicity
+      password, // In a real app, hash this before saving! (e.g. bcrypt)
       firstName,
       lastName,
       name: `${firstName} ${lastName}`,
       phone,
-      role,
-      createdAt: new Date().toISOString()
+      role
+      // createdAt is handled by Postgres default now()
     };
 
-    await db.run(
-      `INSERT INTO users (email, password, firstName, lastName, name, phone, role, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [newUser.email, newUser.password, newUser.firstName, newUser.lastName, newUser.name, newUser.phone, newUser.role, newUser.createdAt]
-    );
+    const { error: insertError } = await supabase
+      .from('users')
+      .insert([newUser] as any);
+
+    if (insertError) {
+      console.error('Supabase write error:', insertError);
+      return res.status(500).json({ error: 'Failed to save new user to database.' });
+    }
 
     // Sign JWT
     const token = jwt.sign(
@@ -312,8 +262,19 @@ app.post('/api/auth/login', async (req: express.Request, res: express.Response) 
       return res.status(400).json({ error: 'Email and Password are required.' });
     }
 
+    if (!supabase) return res.status(500).json({ error: 'Database service not configured.' });
+
     const emailLower = email.trim().toLowerCase();
-    const user = await db.get('SELECT * FROM users WHERE email = ?', [emailLower]);
+    
+    const { data: user, error: dbError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', emailLower)
+      .maybeSingle() as { data: any, error: any };
+
+    if (dbError) {
+      return res.status(500).json({ error: 'Database query failed.' });
+    }
 
     if (!user) {
       return res.status(404).json({ error: 'No operator profile matching this email was found.' });
@@ -376,15 +337,18 @@ app.get('/api/auth/profile', async (req: express.Request, res: express.Response)
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ error: 'Unauthorized credentials.' });
     }
+    if (!supabase) return res.status(500).json({ error: 'Database service not configured.' });
 
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, jwtSecret) as any;
-    const user = await db.get(
-      'SELECT email, firstName, lastName, name, phone, role, createdAt FROM users WHERE email = ?',
-      [decoded.email]
-    );
+    
+    const { data: user, error: dbError } = await supabase
+      .from('users')
+      .select('email, "firstName", "lastName", name, phone, role, "createdAt"')
+      .eq('email', decoded.email)
+      .maybeSingle() as { data: any, error: any };
 
-    if (!user) {
+    if (dbError || !user) {
       return res.status(404).json({ error: 'User not found.' });
     }
 
@@ -426,11 +390,11 @@ app.get('/api/auth/last-otp', (req: express.Request, res: express.Response) => {
   });
 });
 
-initDb().then(() => {
-  app.listen(PORT, () => {
-    console.log(`🚀 Authentication Backend Server running on http://localhost:${PORT}`);
-  });
-}).catch((err) => {
-  console.error('Failed to initialize SQLite Database:', err);
-  process.exit(1);
+app.listen(PORT, () => {
+  console.log(`🚀 Authentication Backend Server running on http://localhost:${PORT}`);
+  if (supabaseUrl) {
+    console.log(`📦 Database: Connected to Supabase at ${supabaseUrl}`);
+  } else {
+    console.log(`⚠️ Database: SUPABASE_URL missing, DB queries will fail.`);
+  }
 });

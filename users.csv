@@ -1,0 +1,5 @@
+email,password,firstName,lastName,name,phone,role,createdAt
+admin@xelco.com,password123,System,Admin,"System Admin",1234567890,Admin,2026-07-03T08:18:48.627Z
+supervisor@xelco.com,password123,John,Supervisor,"John Supervisor",9876543210,Supervisor,2026-07-03T08:18:48.629Z
+housekeeping@xelco.com,password123,Alice,Staff,"Alice Staff",5550293847,"Housekeeping Staff",2026-07-03T08:18:48.629Z
+shindesiddhesh789@gmail.com,xit@2026,SIDDHESH,SHINDE,"SIDDHESH SHINDE",8485012294,Admin,2026-07-03T10:19:50.057Z
