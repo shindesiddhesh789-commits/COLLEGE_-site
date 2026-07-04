@@ -8,9 +8,9 @@ services:
       - key: NODE_ENV
         value: production
       - key: VITE_SUPABASE_URL
-        sync: false
+        value: https://yownstjdvwvejrpepjom.supabase.co
       - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
+        value: sb_publishable_EPNJjvMfKgvh-U6CVTmPJA_lYkISrXj
       - key: SECRET_KEY
         generateValue: true
       - key: JWT_SECRET
