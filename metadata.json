@@ -1,0 +1,6 @@
+{
+  "name": "XelCo InfraTechnologies",
+  "description": "Professional, modern website for XelCo InfraTechnologies Pvt. Ltd., an urban technology platform specializing in intelligent waste management solutions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
